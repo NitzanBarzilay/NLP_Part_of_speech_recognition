@@ -37,5 +37,6 @@ def get_accuracy():
     predictions_df['is_correct'] = predictions_df['tag'] == predictions_df['true_label']
     accuracy = predictions_df['is_correct'].sum() / len(predictions_df.index)
     return (accuracy)
-!=
+
 # ------------------------------------------- QUESTION C ------------------------------------------------------ #
+
