@@ -18,6 +18,14 @@ def create_sentences_data():
         full_data_sents.append(new_sent)
     train_data_sents = full_data_sents[:int(len(full_data_sents) * 0.9)]
     test_data_sents = full_data_sents[int(len(full_data_sents) * 0.9):]
+
+    if pseudo_words:
+        for i in range(len(train_data_sents)):
+            for j in range(len(train_data_sents[i])):
+                word, tag = train_data_sents[i][j]
+                if word != "START" and words_count[word] <= 5: # if it is a rare word
+                    pseudo_word = get_pseudo_word(word)
+                    train_data_sents[i][j] = (pseudo_word,tag)
     return train_data_sents, test_data_sents
 
 def create_words_data():
@@ -29,7 +37,15 @@ def create_words_data():
         full_data_words.append(cur_tuple)
     train_data_words = full_data_words[:int(len(full_data_words) * 0.9)]
     test_data_words = full_data_words[int(len(full_data_words) * 0.9):]
-    return train_data_words, test_data_words
+    train_words_count = ()
+    if pseudo_words:
+        train_words_count = get_word_count_dict(train_data_words)
+        for i in range(len(train_data_words)):
+            word, tag = train_data_words[i]
+            if word != "START" and train_words_count[word] <= 5: # if it is a rare word
+                pseudo_word = get_pseudo_word(word)
+                train_data_words[i] = (pseudo_word,tag)
+    return train_data_words, test_data_words, train_words_count
 
 # ------------------------------------------- QUESTION B ------------------------------------------------------ #
 
@@ -154,7 +170,7 @@ def create_emission_dict(words, smoothing):
 
 # PART B - VITERBI ALGORITHM:
 
-def create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_tags):
+def create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_tags, train_words_dict, pseudo_words):
     n_words = len(sentence)
     n_tags = len(possible_tags)
     back_pointer_table = np.zeros((n_tags, n_words + 1)).astype(int)
@@ -162,6 +178,8 @@ def create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_t
 
     for t in range(n_words):  # for each word
         word = sentence[t][0]
+        if pseudo_words and word not in train_words_dict:
+            word = get_pseudo_word(word)
 
         for j in range(n_tags):  # for each possible tag
             end_max_tag_index = None
@@ -198,10 +216,10 @@ def create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_t
     return pi_table, back_pointer_table
 
 
-def viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, possible_tags):
+def viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, possible_tags, train_words_dict, pseudo_words):
     n_words = len(sentence)
     n_tags = len(possible_tags)
-    pi_table, back_pointer_table = create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_tags)
+    pi_table, back_pointer_table = create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_tags, train_words_dict, pseudo_words)
 
     tag_prediction = [''] * n_words
     # pick last word:
@@ -232,7 +250,7 @@ def viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, po
     return tag_prediction
 
 
-def viterbi_error_rates(test_sentences, train_words, transitions_dict, emissions_dict, possible_tags):
+def viterbi_error_rates(test_sentences, train_words, transitions_dict, emissions_dict, possible_tags, train_words_dict=(), pseudo_words=False):
     unknown_true = 0
     unknown_false = 0
     known_true = 0
@@ -240,7 +258,7 @@ def viterbi_error_rates(test_sentences, train_words, transitions_dict, emissions
     train_words_list = train_words['word'].drop_duplicates().tolist()
     counter = 0
     for sentence in test_sentences:
-        predicted_tags = viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, possible_tags)
+        predicted_tags = viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, possible_tags, train_words_dict, pseudo_words)
         # print(counter + 0.5)
         for i, (word, true_tag) in enumerate(sentence):
             predicted_tag = predicted_tags[i]
@@ -260,10 +278,46 @@ def viterbi_error_rates(test_sentences, train_words, transitions_dict, emissions
 
     return known_error_rate, unknown_error_rate, total_error_rate
 
+
+def detect_rare_words(words_count_df):
+    words_count_df['is_rare'] = 0
+    words_count_df['is_rare'] = words_count_df.where(words_count_df['count'] <= 5, other=1)
+    words_count_df[words_count_df['is_rare']==1]['word'].applymap(get_pseudo_word)
+
+def get_pseudo_word(word):
+    pseudo_words_reg = [
+        (r'^\w+ing$', 'ending_with_ing'),  # suffixes
+        (r'^\w+ed$', 'ending_with_ed'),
+        (r'^\w+tion$', 'ending_with_tion'),
+        (r'^\w+er$', 'ending_with_er'),
+        (r'^\w+s$', 'plural_word'),
+
+        (r'^\d{2}$', 'number_2digit'),  # numbers
+        (r'^\d{4}$', 'number_4digit'),
+        (r'^\d+$', 'number_general'),
+        (r'^\'\d{2}', 'year'),
+        (r'^\d{1,2}:\d{2}(:\d{2})?$', 'timestamp'),
+        (r'\d+%$', 'percentage'),
+        (r'^\d+\.\d+$', 'number_point'),
+        (r'^\$(\d|,)+(\.\d+)?$', 'dollar_price'),
+
+        (r'^\w+\'[a-z]*$', 'contain_apostrophe'),  # special characters
+        (r'^(\w|-)+-(\w|-)+$', 'contain_hyphen'),
+        (r'^[A-Z]+$', 'acronym'),
+        (r'^[A-Z][a-z]+$', 'capitalized'),
+        (r'[a-z]+$', 'not_capitalized')]
+
+    for regex, pseudo_word in pseudo_words_reg:
+        if re.search(regex, word):
+            return pseudo_word
+    return "general_pseudo"
+
+
 if __name__ == '__main__':
     # ------------------Question a------------------#
-    train_sentences, test_sentences = create_sentences_data()
-    train_words, test_words = create_words_data()
+    train_words, test_words, train_words_count = create_words_data()
+    train_sentences, test_sentences = create_sentences_data(train_words_count)
+
 
     # ------------------Question b------------------#
     # Part a:
