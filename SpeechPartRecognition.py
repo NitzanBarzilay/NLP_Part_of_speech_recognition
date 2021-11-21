@@ -87,10 +87,12 @@ def add_start_tags_to_words_df(sentences, words):
     return words_updated
 
 
-def create_transition_emission_dicts(sentences, words):
-    transitions_dict, tags = create_transitions_dict(sentences, words)
-    emission_dict = create_emission_dict(words)
-    return transitions_dict, emission_dict, tags
+def create_transition_emission_dicts(sentences, words, smoothing=False):
+    transitions_dict, possible_tags = create_transitions_dict(sentences, words)
+    emission_dict = create_emission_dict(words, smoothing)
+    possible_tags = possible_tags[possible_tags['tag'] != "START"]['tag'].tolist()
+    possible_tags.insert(0, "START")
+    return transitions_dict, emission_dict, possible_tags
 
 
 def create_transitions_dict(sentences, words):
@@ -128,112 +130,154 @@ def create_transitions_dict(sentences, words):
     return transition_dict, tags
 
 
-def create_emission_dict(words):
+def create_emission_dict(words, smoothing):
     # Count occurrences of each word (on its own) in the training data:
     tags = words['tag']
     all_tags = pd.DataFrame(tags)
     tags_count = all_tags.value_counts().reset_index()
+
 
     # Compute the emission probability for each pair of a word and it's tag:
     words_and_tags = pd.DataFrame(words, columns=['word', 'tag'])
     emissions_df = words_and_tags.drop_duplicates()
     words_and_tags = words_and_tags.groupby(['word', 'tag']).size().reset_index().rename(columns={0: 'pair_count'})
     emissions_df = pd.merge(emissions_df, words_and_tags, how="left", on=['word', 'tag'])
+    if smoothing:
+        emissions_df['pair_count'] += 1
     emissions_df = pd.merge(emissions_df, tags_count, how='left', on='tag').rename(columns={0: 'tag_count'})
-    emissions_df['emission'] = emissions_df['pair_count'] * (1 / emissions_df['tag_count'])
+    delta = len(tags_count.index) if smoothing else 0
+    emissions_df['emission'] = emissions_df['pair_count'] * (1 / (emissions_df['tag_count'] + delta))
     emissions_df['pair'] = list(zip(emissions_df.word, emissions_df.tag))
     emissions_dict = dict(zip(emissions_df.pair, emissions_df.emission))
-
-    emi_dict = defaultdict(lambda: 1e-24)
-    for key in emissions_dict:
-        emi_dict[key] = emissions_dict[key]
-
-    # return emissions_dict
-
-    return emi_dict
+    return emissions_dict
 
 
 # PART B - VITERBI ALGORITHM:
 
 def create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_tags):
-    pi_table = defaultdict(float)
-    back_pointer_table = dict()
-    pi_table[(0, "START")] = 1
-    possible_tags = possible_tags[possible_tags['tag'] != "START"]
-    possible_tags = possible_tags['tag'].tolist()
-    sentence=sentence[1:]
+    n_words = len(sentence)
+    n_tags = len(possible_tags)
+    back_pointer_table = np.zeros((n_tags, n_words + 1)).astype(int)
+    pi_table = np.zeros((n_tags, n_words + 1))
 
-    for i in range(1,len(sentence)+1):
-        cur_possible_tags = ['START'] if i<1 else possible_tags
+    for t in range(n_words):  # for each word
+        word = sentence[t][0]
 
-        word = sentence[i-1][0]
-        for cur_tag in cur_possible_tags:
-            max_tag = None
-            max_score = float("-Inf")
+        for j in range(n_tags):  # for each possible tag
+            end_max_tag_index = None
+            end_max_score = -1.0
+            cur_tag = possible_tags[j]
 
-            prev_possible_tags = ['START'] if i-1<1 else possible_tags
-            for prev_tag in prev_possible_tags:
-                pi_val = pi_table.get((i - 1, prev_tag), 0.0)
-                transition = transitions_dict.get((prev_tag, cur_tag),0.0)
-                emission = emissions_dict.get((word, cur_tag), 1e-24)
-                tag_score = pi_val * transition * emission
+            for i in range(n_tags):  # for each possible previous tag
+                prev_tag = possible_tags[i]
+                pi_value = 1 if t == 0 else pi_table[i][t - 1]  # else condition regards the word START
+                transition = transitions_dict.get((prev_tag, cur_tag),
+                                                  0.0) if t != 0 else 1  # else condition regards the word START
+                emission = emissions_dict.get((word, cur_tag), 0.0)
+                score = pi_value * transition * emission
+                if score > end_max_score:  # update max score up until current tag vs prev tag
+                    end_max_tag_index, end_max_score = i, score
+            pi_table[j][t] = end_max_score
+            back_pointer_table[j][t] = end_max_tag_index
 
-                if tag_score > max_score:
-                    max_tag, max_score = prev_tag, tag_score
+        t_col = pi_table[:, t]
+        t_col_sum = np.sum(t_col)
+        if t_col_sum == 0:  # if the entire column for word t is empty (meaning no possible tag was found)
+            pi_table[:, t] = (1 / n_tags)  # enter the word "NN" with the same probability for each prev word
+            back_pointer_table[:, t] = 3
 
-            pi_table[(i, cur_tag)] = max_score
+    # calculate column of END word:
+    for j in range(n_tags):  # for each possible tag
+        cur_tag = possible_tags[j]
+        pi_val = pi_table[j][n_words - 1]
+        transition = transitions_dict.get((cur_tag, '.'), 0.0)
+        end_score = transition * pi_val
+        pi_table[j][n_words] = end_score
+        back_pointer_table[j][n_words] = j
 
-            back_pointer_table[(i, cur_tag)] = max_tag
     return pi_table, back_pointer_table
 
 
 def viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, possible_tags):
+    n_words = len(sentence)
+    n_tags = len(possible_tags)
     pi_table, back_pointer_table = create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_tags)
-    possible_tags = possible_tags[possible_tags['tag'] != "START"]
-    possible_tags = possible_tags['tag'].tolist()
-    max_tag = None
+
+    tag_prediction = [''] * n_words
+    # pick last word:
     max_score = -1
-    sentence = sentence[1:]
-    n = len(sentence)
-    for tag in possible_tags:
-        pi_val = pi_table.get((n , tag), 0)
-        transition = 0
-        if (tag, '.') in transitions_dict:
-            transition = transitions_dict[(tag, ".")]
-        tag_score = pi_val * transition
-        if tag_score > max_score:
-            max_tag, max_score = tag, tag_score
+    max_tag_index = None
+    for j in range(n_tags):
+        score = pi_table[j][n_words]
+        tag_index = back_pointer_table[j][n_words]
+        if score > max_score:
+            max_score, max_tag_index = score, tag_index
+    tag_prediction[n_words - 1] = max_tag_index
 
-    # Fill tags:
-    p_tags = [""]*n  # initialize empty tag array
-    p_tags[-1] = max_tag # fill base case.
-    for i in range(n - 2, -1, -1): # bp the tags.
-        p_tags[i] = back_pointer_table[(i + 2, p_tags[i + 1])]
-    return p_tags
+    for word_index in range(n_words - 2, -1, -1):
+        tag_index = back_pointer_table[(tag_prediction[word_index + 1], word_index)]
+        if tag_index == 0 and word_index != 0:
+            cur_tags_list = []
+            next_tag = possible_tags[tag_prediction[word_index + 1]]
+            for i in range(n_tags):
+                other_tag = possible_tags[i]
+                if transitions_dict[(other_tag, next_tag)] > 0:
+                    cur_tags_list.append(i)
+            tag_index = 3 if len(cur_tags_list) == 0 else rn.choice(cur_tags_list)
+        tag_prediction[word_index] = tag_index
 
-def viterbi_error_rates(test_sentences, train_sentences, transitions_dict, emissions_dict, possible_tags):
+    for word_index, tag_index in enumerate(tag_prediction):
+        tag_prediction[word_index] = possible_tags[tag_index]
+
+    return tag_prediction
+
+
+def viterbi_error_rates(test_sentences, train_words, transitions_dict, emissions_dict, possible_tags):
+    unknown_true = 0
+    unknown_false = 0
+    known_true = 0
+    known_false = 0
+    train_words_list = train_words['word'].drop_duplicates().tolist()
+    counter = 0
     for sentence in test_sentences:
-        sentence_tags = viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, possible_tags)
-    known_error_rate, unknown_error_rate, total_error_rate = 0, 0, 0
+        predicted_tags = viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, possible_tags)
+        # print(counter + 0.5)
+        for i, (word, true_tag) in enumerate(sentence):
+            predicted_tag = predicted_tags[i]
+            known = word in train_words_list
+            correct = predicted_tag == true_tag
+            unknown_true += (not known and correct)
+            unknown_false += (not known and not correct)
+            known_true += (known and correct)
+            known_false += (known and not correct)
+        # print(counter)
+        counter += 1
+
+    total = unknown_false + unknown_true + known_false + known_true
+    known_error_rate = known_false / (known_false + known_true)
+    unknown_error_rate = unknown_false / (unknown_false + unknown_true)
+    total_error_rate = (known_false + unknown_false) / total
+
     return known_error_rate, unknown_error_rate, total_error_rate
 
 if __name__ == '__main__':
-    # Qustion A:
+    # ------------------Question a------------------#
     train_sentences, test_sentences = create_sentences_data()
     train_words, test_words = create_words_data()
 
-    # Qusetion B:
+    # ------------------Question b------------------#
     # Part a:
     mle_labels = create_all_MLE_labels(train_words)
-    known_error_rate, unknown_error_rate, total_error_rate = MLE_error_rates(test_words, mle_labels)
-    print("------------------------ QUESTION B PART a ---------------------------")
-    print("MLE tagger results:")
-    print("Error rate for known words:", known_error_rate)
-    print("Error rate for unknown words:", unknown_error_rate)
-    print("Total error rate:", total_error_rate)
 
     # Part b:
-    print("------------------------ QUESTION B PART b ---------------------------")
+    mle_known_error_rate, mle_unknown_error_rate, mle_total_error_rate = MLE_error_rates(test_words, mle_labels)
+    print("MLE tagger results:")
+    print("Error rate for known words:", mle_known_error_rate)
+    print("Error rate for unknown words:", mle_unknown_error_rate)
+    print("Total error rate:", mle_total_error_rate,"\n")
+
+    # ------------------Question c------------------#
+    # Part a:
     train_words_start = add_start_tags_to_words_df(train_sentences, train_words)
     test_words_start = add_start_tags_to_words_df(test_sentences, test_words)
     transitions_dict, emissions_dict, possible_tags = create_transition_emission_dicts(train_sentences, train_words_start)
