@@ -3,6 +3,10 @@ import pandas as pd
 
 nltk.download('brown')
 
+# This program loads the news section from the "brown" dataset of NLTK,
+# Generates different part-of-speech tagigng algorithms, trains them,
+# And plots their error rates as long as their confusion matrices.
+
 # ------------------------------------------- QUESTION A ------------------------------------------------------ #
 from nltk.corpus import brown
 
@@ -10,7 +14,7 @@ def create_sentences_data():
     full_data_sents_raw = brown.tagged_sents(categories=["news"])
     full_data_sents = []
     for sentence in full_data_sents_raw:
-        new_sent = [('START', 'START')]
+        new_sent = [('START', 'START')] if add_start else []
         for (word, tag) in sentence:
             cur_tuple = (word, tag.split('-')[0].split('+')[0])
             cur_tuple = cur_tuple if cur_tuple[1] != "" else (word, tag)
@@ -18,15 +22,16 @@ def create_sentences_data():
         full_data_sents.append(new_sent)
     train_data_sents = full_data_sents[:int(len(full_data_sents) * 0.9)]
     test_data_sents = full_data_sents[int(len(full_data_sents) * 0.9):]
-
+    words_count = get_word_count_dict(train_data_sents)
     if pseudo_words:
         for i in range(len(train_data_sents)):
             for j in range(len(train_data_sents[i])):
                 word, tag = train_data_sents[i][j]
-                if word != "START" and words_count[word] <= 5: # if it is a rare word
+                if word != "START" and words_count[word] <= 5:  # if it is a rare word
                     pseudo_word = get_pseudo_word(word)
-                    train_data_sents[i][j] = (pseudo_word,tag)
-    return train_data_sents, test_data_sents
+                    train_data_sents[i][j] = (pseudo_word, tag)
+    train_data_words, test_data_words = create_train_test_words_data(train_data_sents, test_data_sents)
+    return train_data_sents, test_data_sents, train_data_words, test_data_words, words_count
 
 def create_words_data():
     full_data_words_raw = brown.tagged_words(categories=["news"])
@@ -47,9 +52,15 @@ def create_words_data():
                 train_data_words[i] = (pseudo_word,tag)
     return train_data_words, test_data_words, train_words_count
 
+
 # ------------------------------------------- QUESTION B ------------------------------------------------------ #
 
 def create_all_MLE_labels(words):
+    """
+    Creates MLE labels for all words in given dataset.
+    :param words: Dataset of words and their tags.
+    :return: A dictionary that maps each word in given dataset to it's predicted tag.
+    """
     probabilities_df = pd.DataFrame(words, columns=['word', 'tag'])
     label_count_df = probabilities_df.groupby(['word', 'tag']).size().reset_index().rename(columns={0: 'count'})
     MLE_labels_df = label_count_df.sort_values('count', ascending=False).drop_duplicates(['word'])
@@ -58,6 +69,12 @@ def create_all_MLE_labels(words):
 
 
 def get_MLE_label(word, MLE_labels):
+    """
+    Predicts MLE label for a single word.
+    :param word: word to predict.
+    :param MLE_labels: A dictionary that maps each word in given dataset to it's predicted tag.
+    :return: predicted tag and a boolean that represents if the word is unseen in the training data.
+    """
     is_unknown = True
     tag = "NN"
     if word in MLE_labels:
@@ -67,6 +84,12 @@ def get_MLE_label(word, MLE_labels):
 
 
 def MLE_error_rates(test_words, MLE_labels):
+    """
+    Calculates MLE error rates.
+    :param test_words: test dataset of words and their true tags.
+    :param MLE_labels: A dictionary that maps each word in given dataset to it's predicted tag.
+    :return: known_error_rate, unknown_error_rate, total_error_rate
+    """
     unknown_right = 0
     unknown_wrong = 0
     known_right = 0
@@ -93,17 +116,15 @@ def MLE_error_rates(test_words, MLE_labels):
 
 # PART A - TRAINING PHASE:
 
-def add_start_tags_to_words_df(sentences, words):
-    start_rows = []
-    for i in range(len(sentences)):
-        start_rows.append(["START", "START"])
-    start_rows_df = pd.DataFrame(start_rows, columns=['word', 'tag'])
-    words_df = pd.DataFrame(words, columns=['word', 'tag'])
-    words_updated = pd.concat([words_df, start_rows_df]).reset_index(drop=True)
-    return words_updated
-
 
 def create_transition_emission_dicts(sentences, words, smoothing=False):
+    """
+    Creates transition and emmision tables for given training dataset of sentences.
+    :param sentences:  training dataset of sentences.
+    :param words:  training dataset of words.
+    :param smoothing: True for add-1 smoothing, default is False
+    :return: transsmition table (as dict), emmision table (as dict), a list of all possible tags.
+    """
     transitions_dict, possible_tags = create_transitions_dict(sentences, words)
     emission_dict = create_emission_dict(words, smoothing)
     possible_tags = possible_tags[possible_tags['tag'] != "START"]['tag'].tolist()
@@ -112,7 +133,14 @@ def create_transition_emission_dicts(sentences, words, smoothing=False):
 
 
 def create_transitions_dict(sentences, words):
+    """
+    Creates a transmition table for given dataset.
+    :param sentences:  training dataset of sentences.
+    :param words:  training dataset of words.
+    :return: transsmition table (as dict)
+    """
     # Count occurrences of each tag (on its own) in the training data:
+    words = pd.DataFrame(words, columns=['word', 'tag'])
     tags = words['tag']
     all_tags = pd.DataFrame(tags)
     tags = pd.DataFrame(tags).drop_duplicates()
@@ -147,7 +175,14 @@ def create_transitions_dict(sentences, words):
 
 
 def create_emission_dict(words, smoothing):
+    """
+    Creates an emission table for given dataset.
+    :param sentences:  training dataset of sentences.
+    :param words:  training dataset of words.
+    :return: emissiontable (ad dict)
+    """
     # Count occurrences of each word (on its own) in the training data:
+    words = pd.DataFrame(words, columns=['word', 'tag'])
     tags = words['tag']
     all_tags = pd.DataFrame(tags)
     tags_count = all_tags.value_counts().reset_index()
@@ -171,6 +206,16 @@ def create_emission_dict(words, smoothing):
 # PART B - VITERBI ALGORITHM:
 
 def create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_tags, train_words_dict, pseudo_words):
+    """
+    Creates Viterbi tables (pi table and back pointer table) for given dataset.
+    :param sentence:  dataset of tagged sentences.
+    :param transitions_dict:  transsmition table (as dict)
+    :param emissions_dict: emissionn table (ad dict)
+    :param possible_tags: a list of all possible tags in training data
+    :param train_words_dict: a dictionary that maps each word in the training data to it's count
+    :param pseudo_words: True for using pseudo words on rare words, default is False
+    :return: pi_table, back_pointer_table
+    """
     n_words = len(sentence)
     n_tags = len(possible_tags)
     back_pointer_table = np.zeros((n_tags, n_words + 1)).astype(int)
@@ -216,12 +261,25 @@ def create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_t
     return pi_table, back_pointer_table
 
 
-def viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, possible_tags, train_words_dict, pseudo_words):
+def viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, possible_tags, train_words_dict,
+                                  pseudo_words):
+    """
+    Predicts tags for a given sentence.
+    :param sentence:  dataset of tagged sentences.
+    :param transitions_dict:  transsmition table (as dict)
+    :param emissions_dict: emissionn table (ad dict)
+    :param possible_tags: a list of all possible tags in training data
+    :param train_words_dict: a dictionary that maps each word in the training data to it's count
+    :param pseudo_words: True for using pseudo words on rare words, default is False
+    :return: A list of predicted tags for given sentence.
+    """
     n_words = len(sentence)
     n_tags = len(possible_tags)
-    pi_table, back_pointer_table = create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_tags, train_words_dict, pseudo_words)
+    pi_table, back_pointer_table = create_viterbi_tables(sentence, transitions_dict, emissions_dict, possible_tags,
+                                                         train_words_dict, pseudo_words)
 
     tag_prediction = [''] * n_words
+
     # pick last word:
     max_score = -1
     max_tag_index = None
@@ -232,6 +290,7 @@ def viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, po
             max_score, max_tag_index = score, tag_index
     tag_prediction[n_words - 1] = max_tag_index
 
+    # Run backwords from end of sentence and presict each word's tag:
     for word_index in range(n_words - 2, -1, -1):
         tag_index = back_pointer_table[(tag_prediction[word_index + 1], word_index)]
         if tag_index == 0 and word_index != 0:
@@ -244,47 +303,67 @@ def viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, po
             tag_index = 3 if len(cur_tags_list) == 0 else rn.choice(cur_tags_list)
         tag_prediction[word_index] = tag_index
 
+    # replace indexes with actual tags:
     for word_index, tag_index in enumerate(tag_prediction):
         tag_prediction[word_index] = possible_tags[tag_index]
 
     return tag_prediction
 
 
-def viterbi_error_rates(test_sentences, train_words, transitions_dict, emissions_dict, possible_tags, train_words_dict=(), pseudo_words=False):
+def viterbi_error_rates(test_sentences, train_words, transitions_dict, emissions_dict, possible_tags,
+                        train_words_dict=(), pseudo_words=False, return_tags=False):
+    """
+
+    :param sentence:  dataset of tagged sentences.
+    :param train_words:  dataset of tagged words.
+    :param transitions_dict:  transsmition table (as dict)
+    :param emissions_dict: emissionn table (ad dict)
+    :param possible_tags: a list of all possible tags in training data
+    :param train_words_dict: a dictionary that maps each word in the training data to it's count
+    :param pseudo_words: True for using pseudo words on rare words, default is False
+    :param return_tags:  True for returning arrays of true and predicted tags
+    :return: known_error_rate, unknown_error_rate, total_error_rate, true_tags, predicted_tags_list
+    """
     unknown_true = 0
     unknown_false = 0
     known_true = 0
     known_false = 0
+    train_words = pd.DataFrame(train_words, columns=['word', 'tag'])
     train_words_list = train_words['word'].drop_duplicates().tolist()
     counter = 0
+    true_tags = []
+    predicted_tags_list = []
     for sentence in test_sentences:
-        predicted_tags = viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, possible_tags, train_words_dict, pseudo_words)
-        # print(counter + 0.5)
+        predicted_tags = viterbi_predict_sentence_tags(sentence, transitions_dict, emissions_dict, possible_tags,
+                                                       train_words_dict, pseudo_words)
         for i, (word, true_tag) in enumerate(sentence):
             predicted_tag = predicted_tags[i]
+            true_tags.append(true_tag)
+            predicted_tags_list.append(predicted_tag)
             known = word in train_words_list
             correct = predicted_tag == true_tag
             unknown_true += (not known and correct)
             unknown_false += (not known and not correct)
             known_true += (known and correct)
             known_false += (known and not correct)
-        # print(counter)
-        counter += 1
 
     total = unknown_false + unknown_true + known_false + known_true
     known_error_rate = known_false / (known_false + known_true)
     unknown_error_rate = unknown_false / (unknown_false + unknown_true)
     total_error_rate = (known_false + unknown_false) / total
+    if not return_tags:
+        return known_error_rate, unknown_error_rate, total_error_rate
+    else:
+        return known_error_rate, unknown_error_rate, total_error_rate, true_tags, predicted_tags_list
 
-    return known_error_rate, unknown_error_rate, total_error_rate
-
-
-def detect_rare_words(words_count_df):
-    words_count_df['is_rare'] = 0
-    words_count_df['is_rare'] = words_count_df.where(words_count_df['count'] <= 5, other=1)
-    words_count_df[words_count_df['is_rare']==1]['word'].applymap(get_pseudo_word)
+# ------------------------------------------- QUESTION E ------------------------------------------------------ #
 
 def get_pseudo_word(word):
+    """
+    Gets the pseudo word for given word.
+    :param word: word
+    :return: pseudo word for given word.
+    """
     pseudo_words_reg = [
         (r'^\w+ing$', 'ending_with_ing'),  # suffixes
         (r'^\w+ed$', 'ending_with_ed'),
@@ -310,14 +389,36 @@ def get_pseudo_word(word):
     for regex, pseudo_word in pseudo_words_reg:
         if re.search(regex, word):
             return pseudo_word
-    return "general_pseudo"
+    return "general_pseudo"  # if no other tag matched
+
+
+def plot_confusion_matrix(tags_true, tags_predict, unique_tags):
+    """
+    Creates a confusion matrix for given lists of tags.
+    :param tags_true: A list of true tags.
+    :param tags_predict: A list of predicted tags.
+    :param unique_tags: A list of all unique tags in
+    :return: None
+    """
+    my_mat = confusion_matrix(tags_true, tags_predict, labels=unique_tags)
+    # my_mat_norm = (1 / my_mat.sum(axis=1)[:, np.newaxis]).T * my_mat
+    plt.imshow(my_mat)
+
+    plt.xlabel('predicted tags')
+    plt.xticks(ticks=np.arange(len(unique_tags)), labels=unique_tags)
+
+    plt.ylabel('true tags')
+    plt.yticks(ticks=np.arange(len(unique_tags)), labels=unique_tags)
+
+    # plt.colorbar()
+    plt.show()
+
+# ------------------------------------------- RUN PROGRAM ------------------------------------------------------ #
 
 
 if __name__ == '__main__':
     # ------------------Question a------------------#
-    train_words, test_words, train_words_count = create_words_data()
-    train_sentences, test_sentences = create_sentences_data(train_words_count)
-
+    train_sentences, test_sentences, train_words, test_words, words_count = create_data()
 
     # ------------------Question b------------------#
     # Part a:
